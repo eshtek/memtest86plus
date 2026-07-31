@@ -74,7 +74,7 @@ static uint8_t bcd_to_bin(uint8_t bcd)
     return (bcd >> 4) * 10 + (bcd & 0x0F);
 }
 
-static void rtc_get_datetime(int *year, int *mon, int *day, int *hour, int *min, int *sec)
+void rtc_get_datetime(int *year, int *mon, int *day, int *hour, int *min, int *sec)
 {
     // Wait for any update in progress to complete (UIP bit, status register A).
     for (int i = 0; i < 20000 && (rtc_read(0x0A) & 0x80); i++) {}

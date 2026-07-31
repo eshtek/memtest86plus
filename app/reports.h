@@ -20,6 +20,13 @@
  */
 void save_results_to_usb(void);
 
+#if defined(__i386__) || defined(__x86_64__)
+/**
+ * Reads the current date and time from the CMOS RTC.
+ */
+void rtc_get_datetime(int *year, int *mon, int *day, int *hour, int *min, int *sec);
+#endif
+
 /**
  * Emits the serial log start banner. All serial log functions are no-ops
  * unless the "log" boot option was given.

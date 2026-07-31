@@ -64,6 +64,7 @@ extern bool         enable_spd_crc;
 extern bool         enable_tty;
 extern bool         enable_tty_log;
 extern int          log_max_passes;
+extern bool         enable_efi_var;
 extern bool         enable_bench;
 extern bool         enable_mch_read;
 extern bool         enable_ecc_polling;

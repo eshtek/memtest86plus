@@ -44,12 +44,26 @@
 /**
  * EFI_MEMORY_TYPE values.
  */
-#define EFI_LOADER_CODE         1
-#define EFI_LOADER_DATA         2
-#define EFI_BOOT_SERVICES_CODE  3
-#define EFI_BOOT_SERVICES_DATA  4
-#define EFI_CONVENTIONAL_MEMORY 7
-#define EFI_ACPI_RECLAIM_MEMORY 9
+#define EFI_LOADER_CODE             1
+#define EFI_LOADER_DATA             2
+#define EFI_BOOT_SERVICES_CODE      3
+#define EFI_BOOT_SERVICES_DATA      4
+#define EFI_RUNTIME_SERVICES_CODE   5
+#define EFI_RUNTIME_SERVICES_DATA   6
+#define EFI_CONVENTIONAL_MEMORY     7
+#define EFI_ACPI_RECLAIM_MEMORY     9
+
+/**
+ * EFI memory attribute values.
+ */
+#define EFI_MEMORY_RUNTIME      UINT64_C(0x8000000000000000)
+
+/**
+ * EFI variable attribute values.
+ */
+#define EFI_VARIABLE_NON_VOLATILE           0x00000001
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS     0x00000002
+#define EFI_VARIABLE_RUNTIME_ACCESS         0x00000004
 
 /**
  * EFI_RESET_TYPE values.
@@ -67,7 +81,7 @@
 #define PIXEL_BLT_ONLY                      3
 
 #define EFI_SYSTEM_TABLE_SIGNATURE      UINT64_C(0x5453595320494249)
-#define EFI_RUNTIME_SERVICES_SIGNATURE  UINT64_C(0x5652453544e5552)
+#define EFI_RUNTIME_SERVICES_SIGNATURE  UINT64_C(0x56524553544e5552)
 
 #if defined(__x86_64__) || defined(__i386__)
 #define efiapi __attribute__((ms_abi))
@@ -218,7 +232,7 @@ typedef struct {
     unsigned long       convert_pointer;
     unsigned long       get_variable;
     unsigned long       get_next_variable;
-    unsigned long       set_variable;
+    efi_status_t        (efiapi *set_variable)(efi_char16_t *, efi_guid_t *, uint32_t, uintn_t, void *);
     unsigned long       get_next_high_mono_count;
     efi_status_t        (efiapi *reset_system)(int, int, int);
     unsigned long       update_capsule;

@@ -240,7 +240,20 @@ recognised:
     * mutually exclusive with `console=`; if both are given, `log` wins
   * maxpasses=*n*
     * stop after *n* completed passes: emit a final `ev=done` line, then reboot
-    * only used in `log` mode; 0 = unlimited (default)
+    * only used in `log` or `efivar` mode; 0 = unlimited (default)
+  * efivar
+    * record the test results in the `MT86PlusResult` UEFI variable (vendor GUID
+      `b6c2f11a-8a95-4f5e-9c3f-4d1e2a7b9c05`), updated at the start of the run and
+      after each completed pass. The payload is a single NUL-terminated ASCII line,
+      e.g. `MT86P fmt=1 version=9.00 state=pass passes=2 errors=0 ecc_errors=0
+      elapsed=3724 mem_mb=32768 rtc="2026-07-31 12:34:56"`; `state` is `running`
+      until the run completes. Combined with `maxpasses=`*n*, the machine reboots
+      after the final results are recorded, allowing the booted OS to collect them
+      (on Linux, from `/sys/firmware/efi/efivars/MT86PlusResult-b6c2f11a-8a95-4f5e-9c3f-4d1e2a7b9c05`,
+      skipping the leading 4-byte attributes word)
+    * x86/x86_64 UEFI boot only. Requires all EFI runtime regions to reside below
+      4GB; if the firmware cannot be called safely, the variable is simply not
+      written
   * testlist=*x,y,z*
     * where *x,y,z* is a list of the numerical values of the tests to run.
     * if specified, the initial test configuration is modified such that only the

@@ -46,6 +46,7 @@
 #include "badram.h"
 #include "config.h"
 #include "display.h"
+#include "efivar.h"
 #include "error.h"
 #include "reports.h"
 #include "test.h"
@@ -315,6 +316,8 @@ static void global_init(void)
     badram_init();
 
     config_init();
+
+    efivar_init();
 
     memctrl_init();
 
@@ -734,6 +737,7 @@ void main(void)
                     badram_init();
                     error_init();
                     serial_log_run_start();
+                    efivar_write_results(0, false);
                 }
             }
             if (start_pass) {
@@ -833,7 +837,12 @@ void main(void)
         }
 
         if (!dummy_run) {
-            serial_log_event(SLOG_PASS_END);
+            bool run_done = log_max_passes > 0 && pass_num + 1 >= log_max_passes;
+            efivar_write_results(pass_num + 1, run_done);
+            serial_log_event(SLOG_PASS_END);    // reboots here if in log mode and maxpasses was reached
+            if (run_done && enable_efi_var) {
+                reboot();
+            }
         }
         pass_num++;
         if (dummy_run && pass_num == NUM_PASS_TYPES) {
