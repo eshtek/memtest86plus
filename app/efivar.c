@@ -36,9 +36,19 @@
 
 #define ONE_GB              UINT64_C(0x40000000)
 
-// Physical address field of a 2MB PDE, plus the present and page-size flags.
+// memtest's fixed virtual layout: [0,2GB) and [3.5GB,4GB) are permanently identity mapped,
+// [2GB,3GB) is the test window (restored via map_window), and [3GB,3.5GB) is the pd3
+// device-mapping window - the one range firmware runtime regions can land in that isn't
+// identity mapped by default.
+#define VM_DEV_START        (3 * ONE_GB)
+#define VM_DEV_END          (3 * ONE_GB + ONE_GB / 2)
+
+// Physical address field of a 2MB PDE, plus flags. PDE_2MB_PRESENT is the present+page-size
+// pair we require when verifying a mapping; PDE_2MB_IDENTITY (present+write+page-size, 0x83,
+// matching map_region) is what we write when forcing an identity mapping.
 #define PDE_ADDR_MASK       UINT64_C(0x000fffffffe00000)
-#define PDE_2MB_FLAGS       0x81
+#define PDE_2MB_PRESENT     0x81
+#define PDE_2MB_IDENTITY    0x83
 
 //------------------------------------------------------------------------------
 // Types
@@ -76,25 +86,61 @@ static bool                 efi_var_usable = false;
 // Private Functions
 //------------------------------------------------------------------------------
 
-// The firmware runs in physical mode, so every region it needs must be
-// identity mapped when we call it. Virtual [0,2GB) and [3.5GB,4GB) are
-// permanently identity mapped. [2GB,3GB) is restored by map_window() before
-// the call. Virtual [3GB,3.5GB) is backed by pd3 entries that map_region()
-// may have retargeted to device mappings - verify any runtime region there
-// is still identity mapped.
+// Reload CR3 to flush stale TLB entries after editing the page tables.
+static void reload_cr3(void)
+{
+    uintptr_t cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r" (cr3));
+    __asm__ __volatile__("mov %0, %%cr3" : : "r" (cr3) : "memory");
+}
+
+// The firmware runs in physical mode, so every region it touches must be identity mapped
+// when we call it. [0,2GB) and [3.5GB,4GB) are permanently identity mapped, and [2GB,3GB)
+// is restored by map_window(). The gap is [3GB,3.5GB): those pd3 entries hold whatever
+// device/ACPI mappings map_region() built during the run, not identity. Real firmware
+// (e.g. Gigabyte Z690/AMI) marks runtime MMIO in this range - e.g. a 256MB block at 3GB -
+// and calling SetVariable would then dereference an address that maps to the wrong physical
+// page. We're past testing and about to reboot, so overwriting those pd3 slots with an
+// identity mapping is harmless. Any runtime region above 4GB is unreachable in memtest's
+// 4GB virtual space and is rejected at init, so nothing here can fall outside pd3's reach.
+static void map_runtime_window_identity(void)
+{
+    bool changed = false;
+    for (int i = 0; i < num_rt_regions; i++) {
+        uint64_t start = rt_regions[i].start;
+        uint64_t end   = rt_regions[i].end;
+
+        if (start < VM_DEV_START) start = VM_DEV_START;
+        if (end > VM_DEV_END) end = VM_DEV_END;
+        if (start >= end) continue;
+
+        start &= ~(uint64_t)(VM_PAGE_SIZE - 1);
+        for (uint64_t addr = start; addr < end; addr += VM_PAGE_SIZE) {
+            pd3[(addr - VM_DEV_START) >> VM_PAGE_SHIFT] = addr | PDE_2MB_IDENTITY;
+            changed = true;
+        }
+    }
+    if (changed) reload_cr3();
+}
+
+// Post-condition check for map_runtime_window_identity(): confirm every runtime region in
+// the [3GB,3.5GB) window is now identity mapped in pd3. A belt-and-braces guard against a
+// mapping bug before we hand control to firmware - if it ever fails we skip the call rather
+// than risk a hang.
 static bool rt_regions_mapped(void)
 {
     for (int i = 0; i < num_rt_regions; i++) {
         uint64_t start = rt_regions[i].start;
         uint64_t end   = rt_regions[i].end;
 
-        if (start < 3 * ONE_GB) start = 3 * ONE_GB;
-        if (end > 3 * ONE_GB + ONE_GB / 2) end = 3 * ONE_GB + ONE_GB / 2;
+        if (start < VM_DEV_START) start = VM_DEV_START;
+        if (end > VM_DEV_END) end = VM_DEV_END;
+        if (start >= end) continue;
 
         start &= ~(uint64_t)(VM_PAGE_SIZE - 1);
         for (uint64_t addr = start; addr < end; addr += VM_PAGE_SIZE) {
-            uint64_t pde = pd3[(addr - 3 * ONE_GB) >> VM_PAGE_SHIFT];
-            if ((pde & PDE_2MB_FLAGS) != PDE_2MB_FLAGS || (pde & PDE_ADDR_MASK) != addr) {
+            uint64_t pde = pd3[(addr - VM_DEV_START) >> VM_PAGE_SHIFT];
+            if ((pde & PDE_2MB_PRESENT) != PDE_2MB_PRESENT || (pde & PDE_ADDR_MASK) != addr) {
                 return false;
             }
         }
@@ -221,7 +267,7 @@ void efivar_init(void)
         // Runtime regions we can't identity map make the firmware unsafe to call.
         if (end > 4 * ONE_GB) return;
 
-        if (start < 3 * ONE_GB && end > 2 * ONE_GB) {
+        if (start < VM_DEV_START && end > 2 * ONE_GB) {
             need_window_remap = true;
         }
 
@@ -244,6 +290,10 @@ bool efivar_write_results(int passes_completed, bool final)
         // re-establishes its own mapping, so no need to switch back.
         map_window(PAGE_C(2,GB));
     }
+    // Identity-map any runtime region living in the [3GB,3.5GB) device window, then confirm
+    // it took. Without this, firmware runtime MMIO placed there (seen on real Z690/AMI HW)
+    // makes the physical-mode SetVariable call dereference the wrong page.
+    map_runtime_window_identity();
     if (!rt_regions_mapped()) {
         efi_var_usable = false;
         return false;
