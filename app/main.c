@@ -838,10 +838,31 @@ void main(void)
 
         if (!dummy_run) {
             bool run_done = log_max_passes > 0 && pass_num + 1 >= log_max_passes;
-            efivar_write_results(pass_num + 1, run_done);
+            bool results_saved = efivar_write_results(pass_num + 1, run_done);
             serial_log_event(SLOG_PASS_END);    // reboots here if in log mode and maxpasses was reached
             if (run_done && enable_efi_var) {
-                reboot();
+                if (!no_auto_reboot) {
+                    // Headless flow: always return to the OS, even when the results could
+                    // not be saved - the collector reports the failed save, and the user
+                    // can rerun with `noreboot` to read the screen instead.
+                    if (results_saved) {
+                        display_notice("Test complete - results saved. Rebooting...");
+                    } else {
+                        display_notice("Test complete - results could not be saved. Rebooting...");
+                    }
+                    usleep(3 * 1000 * 1000);
+                    reboot();
+                }
+                // Someone is watching: keep testing with the results on screen; they
+                // reboot with <Esc> when done. Later passes still retry the NVRAM write
+                // (padded strings so the shorter message fully overwrites the longer).
+                if (results_saved) {
+                    display_pinned_message(0, 0, "Test complete - results saved to NVRAM.              ");
+                    display_pinned_message(1, 0, "Press <Esc> to reboot.                              ");
+                } else {
+                    display_pinned_message(0, 0, "Test complete - results could NOT be saved to NVRAM.");
+                    display_pinned_message(1, 0, "Note the outcome, then press <Esc> to reboot.");
+                }
             }
         }
         pass_num++;

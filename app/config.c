@@ -115,6 +115,7 @@ bool            enable_tty         = false;
 bool            enable_tty_log     = false;             // Machine-parseable serial log instead of interactive console
 int             log_max_passes     = 0;                 // Reboot after N passes in log mode (0 = unlimited)
 bool            enable_efi_var     = false;             // Record test results in a UEFI variable
+bool            no_auto_reboot     = false;             // Stay at the results screen when maxpasses is reached (efivar mode)
 uintptr_t       tty_address        = 0x3F8;             // Legacy IO or MMIO Address accepted
 int             tty_baud_rate      = 115200;
 int             tty_update_period  = 2;                 // Update TTY every 2 seconds (default)
@@ -309,6 +310,8 @@ static void parse_option(const char *option, const char *params)
         log_max_passes = parse_decimal(params, &params);
     } else if (strncmp(option, "efivar", 7) == 0) {
         enable_efi_var = true;
+    } else if (strncmp(option, "noreboot", 9) == 0) {
+        no_auto_reboot = true;
     } else if (strncmp(option, "newline", 7) == 0) {
         tty_new_line = true;
     } else if (strncmp(option, "cpuseqmode", 11) == 0) {

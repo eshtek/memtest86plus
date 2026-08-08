@@ -50,6 +50,22 @@
 #define PDE_2MB_PRESENT     0x81
 #define PDE_2MB_IDENTITY    0x83
 
+#if (ARCH_BITS == 64)
+// Table-pointer entries (pml4/pdpt levels): present + writable, pointing at the next-level
+// table, whose physical address sits in bits [51:12].
+#define PT_TABLE_FLAGS      UINT64_C(0x3)
+#define PT_ADDR_MASK        UINT64_C(0x000ffffffffff000)
+
+// Page-table pool for identity-mapping runtime regions above 4GB (boards with above-4G
+// decoding put runtime MMIO up there). Each pool PD maps one 1GB slot with 2MB pages; each
+// pool PDPT serves one 512GB pml4 slot beyond the first (the first reuses the boot `pdp`
+// table, whose entries 4..511 are free). Demand is counted at init and the feature is
+// disabled if it would exceed the pool - in practice boards expose one or two high runtime
+// regions spanning a handful of GBs.
+#define MAX_HIGH_PDS        8
+#define MAX_HIGH_PDPTS      4
+#endif
+
 //------------------------------------------------------------------------------
 // Types
 //------------------------------------------------------------------------------
@@ -82,6 +98,18 @@ static int                  num_rt_regions = 0;
 static bool                 need_window_remap = false;
 static bool                 efi_var_usable = false;
 
+#if (ARCH_BITS == 64)
+static uint64_t             high_pds[MAX_HIGH_PDS][512] __attribute__((aligned(4096)));
+static uint64_t             high_pdpts[MAX_HIGH_PDPTS][512] __attribute__((aligned(4096)));
+
+// Distinct 1GB slots (>= 4GB) covering the high runtime regions, and the distinct 512GB
+// pml4 slots beyond the first that contain them. Both fixed at init.
+static uint64_t             high_gb_slots[MAX_HIGH_PDS];
+static int                  num_high_gb_slots = 0;
+static uint64_t             high_pml4_slots[MAX_HIGH_PDPTS];
+static int                  num_high_pml4_slots = 0;
+#endif
+
 //------------------------------------------------------------------------------
 // Private Functions
 //------------------------------------------------------------------------------
@@ -100,9 +128,12 @@ static void reload_cr3(void)
 // device/ACPI mappings map_region() built during the run, not identity. Real firmware
 // (e.g. Gigabyte Z690/AMI) marks runtime MMIO in this range - e.g. a 256MB block at 3GB -
 // and calling SetVariable would then dereference an address that maps to the wrong physical
-// page. We're past testing and about to reboot, so overwriting those pd3 slots with an
-// identity mapping is harmless. Any runtime region above 4GB is unreachable in memtest's
-// 4GB virtual space and is rejected at init, so nothing here can fall outside pd3's reach.
+// page. Overwriting those pd3 slots with an identity mapping is harmless: the device window
+// is only used by our own code, which remaps what it needs on the next map_region() call.
+// Runtime regions above 4GB are handled separately: on 64-bit builds
+// map_high_runtime_identity() maps them from a static page-table pool for the duration of
+// the SetVariable call; on 32-bit builds (PAE, 4-entry root, 4GB virtual space) they are
+// unmappable and the feature is rejected at init.
 static void map_runtime_window_identity(void)
 {
     bool changed = false;
@@ -147,6 +178,114 @@ static bool rt_regions_mapped(void)
     }
     return true;
 }
+
+#if (ARCH_BITS == 64)
+// Records the 1GB slots (and any pml4 slots beyond the first) needed to identity map the
+// part of a runtime region above 4GB. Called at init, so pool exhaustion disables the
+// feature up front rather than failing at write time. Returns false if the pool is too
+// small for this board.
+static bool record_high_region(uint64_t start, uint64_t end)
+{
+    if (start < 4 * ONE_GB) start = 4 * ONE_GB;
+
+    for (uint64_t base = start & ~(ONE_GB - 1); base < end; base += ONE_GB) {
+        int i = 0;
+        while (i < num_high_gb_slots && high_gb_slots[i] != base) i++;
+        if (i < num_high_gb_slots) continue;
+
+        if (num_high_gb_slots == MAX_HIGH_PDS) return false;
+        high_gb_slots[num_high_gb_slots++] = base;
+
+        uint64_t pml4_base = base & ~((UINT64_C(1) << 39) - 1);
+        if (pml4_base != 0) {
+            int j = 0;
+            while (j < num_high_pml4_slots && high_pml4_slots[j] != pml4_base) j++;
+            if (j == num_high_pml4_slots) {
+                if (num_high_pml4_slots == MAX_HIGH_PDPTS) return false;
+                high_pml4_slots[num_high_pml4_slots++] = pml4_base;
+            }
+        }
+    }
+    return true;
+}
+
+// Identity-maps every recorded high 1GB slot from the static pool. Built fresh on every
+// call and torn down by unmap_high_runtime_identity() right after SetVariable returns: the
+// program relocates itself during testing and the pool tables move with it, so entries
+// written here would dangle if they outlived the call. The boot `pdp` covers pml4 slot 0
+// (its entries 4..511 are alignment padding, free for us); other pml4 slots get a pool
+// PDPT first. All tables live in the image, which is always identity mapped, so a table's
+// virtual address doubles as the physical address the paging entries need.
+static void map_high_runtime_identity(void)
+{
+    if (num_high_gb_slots == 0) return;
+
+    for (int i = 0; i < num_high_pml4_slots; i++) {
+        uint64_t *pdpt = high_pdpts[i];
+        for (int j = 0; j < 512; j++) {
+            pdpt[j] = 0;
+        }
+        pml4[(high_pml4_slots[i] >> 39) & 511] = (uint64_t)(uintptr_t)pdpt | PT_TABLE_FLAGS;
+    }
+    for (int i = 0; i < num_high_gb_slots; i++) {
+        uint64_t base = high_gb_slots[i];
+        uint64_t *pd = high_pds[i];
+        for (int j = 0; j < 512; j++) {
+            pd[j] = (base + ((uint64_t)j << VM_PAGE_SHIFT)) | PDE_2MB_IDENTITY;
+        }
+        int pml4_idx = (int)((base >> 39) & 511);
+        uint64_t *pdpt = pml4_idx == 0 ? pdp : (uint64_t *)(uintptr_t)(pml4[pml4_idx] & PT_ADDR_MASK);
+        pdpt[(base >> 30) & 511] = (uint64_t)(uintptr_t)pd | PT_TABLE_FLAGS;
+    }
+    reload_cr3();
+}
+
+static void unmap_high_runtime_identity(void)
+{
+    if (num_high_gb_slots == 0) return;
+
+    for (int i = 0; i < num_high_gb_slots; i++) {
+        uint64_t base = high_gb_slots[i];
+        if (((base >> 39) & 511) == 0) {
+            pdp[(base >> 30) & 511] = 0;
+        }
+    }
+    for (int i = 0; i < num_high_pml4_slots; i++) {
+        pml4[(high_pml4_slots[i] >> 39) & 511] = 0;
+    }
+    reload_cr3();
+}
+
+// Post-condition check for map_high_runtime_identity(): walk the live tables and confirm
+// every 2MB page of every high runtime region is identity mapped. Same belt-and-braces
+// guard as rt_regions_mapped() - on failure we skip the firmware call rather than risk a
+// hang.
+static bool high_rt_regions_mapped(void)
+{
+    for (int i = 0; i < num_rt_regions; i++) {
+        uint64_t start = rt_regions[i].start;
+        uint64_t end   = rt_regions[i].end;
+
+        if (end <= 4 * ONE_GB) continue;
+        if (start < 4 * ONE_GB) start = 4 * ONE_GB;
+
+        start &= ~(uint64_t)(VM_PAGE_SIZE - 1);
+        for (uint64_t addr = start; addr < end; addr += VM_PAGE_SIZE) {
+            uint64_t pml4e = pml4[(addr >> 39) & 511];
+            if (!(pml4e & 1)) return false;
+            const uint64_t *pdpt = (const uint64_t *)(uintptr_t)(pml4e & PT_ADDR_MASK);
+            uint64_t pdpte = pdpt[(addr >> 30) & 511];
+            if (!(pdpte & 1) || (pdpte & 0x80)) return false;
+            const uint64_t *pd = (const uint64_t *)(uintptr_t)(pdpte & PT_ADDR_MASK);
+            uint64_t pde = pd[(addr >> 21) & 511];
+            if ((pde & PDE_2MB_PRESENT) != PDE_2MB_PRESENT || (pde & PDE_ADDR_MASK) != addr) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#endif
 
 static char *append_char(char *pos, char *end, char c)
 {
@@ -264,8 +403,21 @@ void efivar_init(void)
         uint64_t start = desc->phys_addr;
         uint64_t end   = start + (desc->num_pages << PAGE_SHIFT);
 
-        // Runtime regions we can't identity map make the firmware unsafe to call.
-        if (end > 4 * ONE_GB) return;
+        if (end > 4 * ONE_GB) {
+#if (ARCH_BITS == 64)
+            // Above 4GB - typically runtime MMIO placed high by above-4G decoding.
+            // Mappable via the high page-table pool as long as it stays within 4-level
+            // paging's reach; a region we can't identity map makes the firmware unsafe
+            // to call.
+            if (end > (UINT64_C(1) << 48)) return;
+            if (!record_high_region(start, end)) return;
+#else
+            // PAE's 4-entry root maps only 4GB of virtual space, so a runtime region
+            // above 4GB can never be identity mapped here - the firmware is unsafe to
+            // call.
+            return;
+#endif
+        }
 
         if (start < VM_DEV_START && end > 2 * ONE_GB) {
             need_window_remap = true;
@@ -276,6 +428,32 @@ void efivar_init(void)
         rt_regions[num_rt_regions].end   = end;
         num_rt_regions++;
     }
+
+#ifdef EFIVAR_TEST_HIGH_REGIONS
+    // Test hook, never defined by the shipping Makefiles: injects fake high runtime
+    // regions so the >4GB mapping path can be exercised in QEMU/OVMF, whose firmware
+    // never places runtime regions up there. The firmware won't dereference the fakes,
+    // so they don't need to be RAM-backed.
+    {
+        static const uint64_t fakes[][2] = {
+            { UINT64_C(0x140000000), UINT64_C(0x144000000) },   // 5GB, pdp[4..] path
+            { UINT64_C(0x8000000000), UINT64_C(0x8008000000) }, // 512GB, pml4 pool path
+        };
+        for (unsigned int i = 0; i < sizeof(fakes) / sizeof(fakes[0]); i++) {
+            if (!record_high_region(fakes[i][0], fakes[i][1])) return;
+            if (num_rt_regions == MAX_RT_REGIONS) return;
+            rt_regions[num_rt_regions].start = fakes[i][0];
+            rt_regions[num_rt_regions].end   = fakes[i][1];
+            num_rt_regions++;
+        }
+    }
+#endif
+
+#ifdef EFIVAR_TEST_UNUSABLE
+    // Test hook, never defined by the shipping Makefiles: leave the feature disabled, as
+    // on firmware we cannot safely call - for exercising the write-failure path.
+    return;
+#endif
 
     efi_set_variable = rs->set_variable;
     efi_var_usable = true;
@@ -298,6 +476,16 @@ bool efivar_write_results(int passes_completed, bool final)
         efi_var_usable = false;
         return false;
     }
+#if (ARCH_BITS == 64)
+    // Same for runtime regions above 4GB (seen on real ASUS/AMI HW with above-4G decoding:
+    // a runtime MMIO block at 98GB), which need page-table entries of their own.
+    map_high_runtime_identity();
+    if (!high_rt_regions_mapped()) {
+        unmap_high_runtime_identity();
+        efi_var_usable = false;
+        return false;
+    }
+#endif
 
     char buf[PAYLOAD_BUF_SIZE];
     char *end = buf + sizeof(buf) - 1;
@@ -342,6 +530,10 @@ bool efivar_write_results(int passes_completed, bool final)
     efi_status_t status = efi_set_variable(results_name, &results_guid, EFI_VAR_ATTRS,
                                            (uintn_t)(pos - buf + 1), buf);
     irq_restore(flags);
+
+#if (ARCH_BITS == 64)
+    unmap_high_runtime_identity();
+#endif
 
     return status == EFI_SUCCESS;
 }

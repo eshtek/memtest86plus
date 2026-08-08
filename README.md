@@ -248,12 +248,21 @@ recognised:
       e.g. `MT86P fmt=1 version=9.00 state=pass passes=2 errors=0 ecc_errors=0
       elapsed=3724 mem_mb=32768 rtc="2026-07-31 12:34:56"`; `state` is `running`
       until the run completes. Combined with `maxpasses=`*n*, the machine reboots
-      after the final results are recorded, allowing the booted OS to collect them
-      (on Linux, from `/sys/firmware/efi/efivars/MT86PlusResult-b6c2f11a-8a95-4f5e-9c3f-4d1e2a7b9c05`,
+      once the run completes - whether or not the final write succeeded - allowing
+      the booted OS to collect the results (on Linux, from
+      `/sys/firmware/efi/efivars/MT86PlusResult-b6c2f11a-8a95-4f5e-9c3f-4d1e2a7b9c05`,
       skipping the leading 4-byte attributes word)
-    * x86/x86_64 UEFI boot only. Requires all EFI runtime regions to reside below
-      4GB; if the firmware cannot be called safely, the variable is simply not
-      written
+    * x86/x86_64 UEFI boot only. On x86_64, EFI runtime regions above 4GB (e.g.
+      runtime MMIO placed high by above-4G decoding) are identity mapped for the
+      duration of each write; on 32-bit builds all runtime regions must reside
+      below 4GB. If the firmware cannot be called safely, the variable is simply
+      not written
+  * noreboot
+    * with `efivar` and `maxpasses=`*n*: stay at the results screen instead of
+      rebooting when the run completes, for manually recording the outcome (e.g.
+      when the firmware cannot store the results variable). A notice reports
+      whether the results were saved; testing continues (retrying the write each
+      pass) until Esc is pressed
   * testlist=*x,y,z*
     * where *x,y,z* is a list of the numerical values of the tests to run.
     * if specified, the initial test configuration is modified such that only the
