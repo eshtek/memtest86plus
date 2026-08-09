@@ -76,6 +76,7 @@ typedef struct {
 } rt_region_t;
 
 typedef efi_status_t (efiapi *efi_set_variable_t)(efi_char16_t *, efi_guid_t *, uint32_t, uintn_t, void *);
+typedef efi_status_t (efiapi *efi_get_variable_t)(efi_char16_t *, efi_guid_t *, uint32_t *, uintn_t *, void *);
 
 //------------------------------------------------------------------------------
 // Private Variables
@@ -99,7 +100,12 @@ static efi_char16_t bootnext_name[] = {
     'B', 'o', 'o', 't', 'N', 'e', 'x', 't', 0
 };
 
+static efi_char16_t bootcurrent_name[] = {
+    'B', 'o', 'o', 't', 'C', 'u', 'r', 'r', 'e', 'n', 't', 0
+};
+
 static efi_set_variable_t   efi_set_variable = NULL;
+static efi_get_variable_t   efi_get_variable = NULL;
 
 static rt_region_t          rt_regions[MAX_RT_REGIONS];
 static int                  num_rt_regions = 0;
@@ -465,6 +471,7 @@ void efivar_init(void)
 #endif
 
     efi_set_variable = rs->set_variable;
+    efi_get_variable = (efi_get_variable_t)rs->get_variable;
     efi_var_usable = true;
 }
 
@@ -541,11 +548,33 @@ bool efivar_write_results(int passes_completed, bool final)
     if (final) {
         // The firmware must delete BootNext when it consumes it, but real AMI boards have
         // been seen leaving it set - the self-reboot after this write then boots the test
-        // AGAIN instead of returning to the OS (seen on Z690 AERO D: a completed run's
-        // reboot landed back in memtest). Delete it ourselves while the runtime mappings
-        // are in place; a spec-compliant firmware just returns EFI_NOT_FOUND. Done even
-        // when the results write failed - a boot loop is worse than a lost result.
+        // AGAIN instead of returning to the OS. Delete it ourselves while the runtime
+        // mappings are in place; a spec-compliant firmware just returns EFI_NOT_FOUND.
+        // Done even when the results write failed - a boot loop is worse than a lost
+        // result.
         efi_set_variable(bootnext_name, &global_variable_guid, 0, 0, NULL);
+
+        // With `oneshot`, also delete the Boot#### entry we were booted from. Some AMI
+        // firmware re-tries a boot option it considers failed (no OS-ready handshake
+        // before the reset) on the next boot, ignoring BootOrder and needing no BootNext -
+        // seen on Z690 AERO D: a completed run's reboot landed back in memtest even after
+        // BootNext was deleted. A nonexistent entry can't be retried. Opt-in only: a user
+        // who boots memtest from a permanent boot entry must never lose it.
+        if (one_shot_boot && efi_get_variable != NULL) {
+            uint16_t current = 0;
+            uintn_t size = sizeof(current);
+            efi_status_t get_status =
+                efi_get_variable(bootcurrent_name, &global_variable_guid, NULL, &size, &current);
+            if (get_status == 0 && size == sizeof(current)) {
+                static const char hex_digits[] = "0123456789ABCDEF";
+                efi_char16_t entry_name[9] = { 'B', 'o', 'o', 't', 0, 0, 0, 0, 0 };
+                entry_name[4] = hex_digits[(current >> 12) & 0xf];
+                entry_name[5] = hex_digits[(current >> 8) & 0xf];
+                entry_name[6] = hex_digits[(current >> 4) & 0xf];
+                entry_name[7] = hex_digits[current & 0xf];
+                efi_set_variable(entry_name, &global_variable_guid, 0, 0, NULL);
+            }
+        }
     }
     irq_restore(flags);
 

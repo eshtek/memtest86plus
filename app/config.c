@@ -116,6 +116,7 @@ bool            enable_tty_log     = false;             // Machine-parseable ser
 int             log_max_passes     = 0;                 // Reboot after N passes in log mode (0 = unlimited)
 bool            enable_efi_var     = false;             // Record test results in a UEFI variable
 bool            no_auto_reboot     = false;             // Stay at the results screen when maxpasses is reached (efivar mode)
+bool            one_shot_boot      = false;             // Delete the boot entry we booted from at end of run (efivar mode)
 uintptr_t       tty_address        = 0x3F8;             // Legacy IO or MMIO Address accepted
 int             tty_baud_rate      = 115200;
 int             tty_update_period  = 2;                 // Update TTY every 2 seconds (default)
@@ -312,6 +313,8 @@ static void parse_option(const char *option, const char *params)
         enable_efi_var = true;
     } else if (strncmp(option, "noreboot", 9) == 0) {
         no_auto_reboot = true;
+    } else if (strncmp(option, "oneshot", 8) == 0) {
+        one_shot_boot = true;
     } else if (strncmp(option, "newline", 7) == 0) {
         tty_new_line = true;
     } else if (strncmp(option, "cpuseqmode", 11) == 0) {

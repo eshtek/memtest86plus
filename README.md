@@ -263,6 +263,13 @@ recognised:
       when the firmware cannot store the results variable). A notice reports
       whether the results were saved; testing continues (retrying the write each
       pass) until Esc is pressed
+  * oneshot
+    * with `efivar` and `maxpasses=`*n*: the boot entry memtest was started from
+      is a one-shot — delete it (via `BootCurrent`) once the run completes, along
+      with any stale `BootNext`. For orchestrated flows that create a dedicated
+      entry per run: some firmware re-tries a boot option it considers failed on
+      the next boot, which would boot the test in a loop. Never use this when
+      booting memtest from a permanent boot entry — the entry is deleted
   * testlist=*x,y,z*
     * where *x,y,z* is a list of the numerical values of the tests to run.
     * if specified, the initial test configuration is modified such that only the
