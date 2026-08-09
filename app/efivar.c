@@ -90,6 +90,15 @@ static efi_char16_t results_name[] = {
     'M', 'T', '8', '6', 'P', 'l', 'u', 's', 'R', 'e', 's', 'u', 'l', 't', 0
 };
 
+// EFI_GLOBAL_VARIABLE_GUID - owner of BootNext.
+static efi_guid_t global_variable_guid = {
+    0x8be4df61, 0x93ca, 0x11d2, { 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c }
+};
+
+static efi_char16_t bootnext_name[] = {
+    'B', 'o', 'o', 't', 'N', 'e', 'x', 't', 0
+};
+
 static efi_set_variable_t   efi_set_variable = NULL;
 
 static rt_region_t          rt_regions[MAX_RT_REGIONS];
@@ -529,6 +538,15 @@ bool efivar_write_results(int passes_completed, bool final)
     uintptr_t flags = irq_save();
     efi_status_t status = efi_set_variable(results_name, &results_guid, EFI_VAR_ATTRS,
                                            (uintn_t)(pos - buf + 1), buf);
+    if (final) {
+        // The firmware must delete BootNext when it consumes it, but real AMI boards have
+        // been seen leaving it set - the self-reboot after this write then boots the test
+        // AGAIN instead of returning to the OS (seen on Z690 AERO D: a completed run's
+        // reboot landed back in memtest). Delete it ourselves while the runtime mappings
+        // are in place; a spec-compliant firmware just returns EFI_NOT_FOUND. Done even
+        // when the results write failed - a boot loop is worse than a lost result.
+        efi_set_variable(bootnext_name, &global_variable_guid, 0, 0, NULL);
+    }
     irq_restore(flags);
 
 #if (ARCH_BITS == 64)
