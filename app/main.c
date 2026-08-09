@@ -737,7 +737,13 @@ void main(void)
                     badram_init();
                     error_init();
                     serial_log_run_start();
-                    efivar_write_results(0, false);
+                    // Deliberately NO efivar checkpoint write here. On real AMI firmware
+                    // (Z690 AERO D BIOS F33) SetVariable this soon after SMP bring-up
+                    // flakily hard-freezes the machine - 4 of 6 boots froze in exactly
+                    // this window, while the pass-end writes below never did. Crash
+                    // evidence starts at the first pass-end write instead; a run that
+                    // dies before then simply leaves no variable, which collectors
+                    // already treat as "results unavailable".
                 }
             }
             if (start_pass) {
