@@ -113,6 +113,14 @@ static int                  num_rt_regions = 0;
 static bool                 need_window_remap = false;
 static bool                 efi_var_usable = false;
 
+// Snapshot of pd3 taken before map_runtime_window_identity() overwrites device-window slots,
+// restored once the firmware calls return. The overwrite used to be treated as harmless
+// ("we're about to reboot"), but mid-run writes broke that assumption: the screen framebuffer
+// mapping lives in those slots, and clobbering it sent the next display update into whatever
+// device the runtime MMIO region decodes (PCIe ECAM at 0xC0000000 on the boxes that froze) -
+// hanging the machine right after an otherwise successful pass-end write.
+static uint64_t             saved_pd3[512];
+
 #if (ARCH_BITS == 64)
 static uint64_t             high_pds[MAX_HIGH_PDS][512] __attribute__((aligned(4096)));
 static uint64_t             high_pdpts[MAX_HIGH_PDPTS][512] __attribute__((aligned(4096)));
@@ -143,8 +151,9 @@ static void reload_cr3(void)
 // device/ACPI mappings map_region() built during the run, not identity. Real firmware
 // (e.g. Gigabyte Z690/AMI) marks runtime MMIO in this range - e.g. a 256MB block at 3GB -
 // and calling SetVariable would then dereference an address that maps to the wrong physical
-// page. Overwriting those pd3 slots with an identity mapping is harmless: the device window
-// is only used by our own code, which remaps what it needs on the next map_region() call.
+// page. The caller snapshots pd3 first and restores it afterwards: the framebuffer mapping
+// lives in these slots, and leaving them identity-mapped sends every later screen write into
+// that runtime MMIO instead - a machine hang on boxes where it decodes PCIe config space.
 // Runtime regions above 4GB are handled separately: on 64-bit builds
 // map_high_runtime_identity() maps them from a static page-table pool for the duration of
 // the SetVariable call; on 32-bit builds (PAE, 4-entry root, 4GB virtual space) they are
@@ -475,9 +484,27 @@ void efivar_init(void)
     efi_var_usable = true;
 }
 
+// Undo the temporary firmware-call mappings: put the run's device mappings back into pd3
+// (framebuffer included) and drop any high-region tables. Must run on every exit path of
+// efivar_write_results once the snapshot has been taken.
+static void restore_run_mappings(void)
+{
+    for (int i = 0; i < 512; i++) {
+        pd3[i] = saved_pd3[i];
+    }
+#if (ARCH_BITS == 64)
+    unmap_high_runtime_identity();
+#endif
+    reload_cr3();
+}
+
 bool efivar_write_results(int passes_completed, bool final)
 {
     if (!efi_var_usable) return false;
+
+    for (int i = 0; i < 512; i++) {
+        saved_pd3[i] = pd3[i];
+    }
 
     if (need_window_remap) {
         // Restore the identity mapping of [2GB,3GB). The next test window
@@ -489,6 +516,7 @@ bool efivar_write_results(int passes_completed, bool final)
     // makes the physical-mode SetVariable call dereference the wrong page.
     map_runtime_window_identity();
     if (!rt_regions_mapped()) {
+        restore_run_mappings();
         efi_var_usable = false;
         return false;
     }
@@ -497,7 +525,7 @@ bool efivar_write_results(int passes_completed, bool final)
     // a runtime MMIO block at 98GB), which need page-table entries of their own.
     map_high_runtime_identity();
     if (!high_rt_regions_mapped()) {
-        unmap_high_runtime_identity();
+        restore_run_mappings();
         efi_var_usable = false;
         return false;
     }
@@ -578,9 +606,7 @@ bool efivar_write_results(int passes_completed, bool final)
     }
     irq_restore(flags);
 
-#if (ARCH_BITS == 64)
-    unmap_high_runtime_identity();
-#endif
+    restore_run_mappings();
 
     return status == EFI_SUCCESS;
 }
