@@ -842,8 +842,8 @@ void main(void)
             continue;
         }
 
+        bool run_done = log_max_passes > 0 && pass_num + 1 >= log_max_passes;
         if (!dummy_run) {
-            bool run_done = log_max_passes > 0 && pass_num + 1 >= log_max_passes;
             bool results_saved = efivar_write_results(pass_num + 1, run_done);
             serial_log_event(SLOG_PASS_END);    // reboots here if in log mode and maxpasses was reached
             if (run_done && enable_efi_var) {
@@ -883,7 +883,11 @@ void main(void)
             display_pass_count(pass_num);
             if (error_count == 0) {
                 display_status("Pass   ");
-                display_big_status(true);
+                // With maxpasses set, the green PASS banner would otherwise appear after
+                // the first pass and users quit early thinking the run is complete.
+                if (log_max_passes == 0 || run_done) {
+                    display_big_status(true);
+                }
             } else {
                 display_big_status(false);
             }

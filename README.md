@@ -241,6 +241,8 @@ recognised:
   * maxpasses=*n*
     * stop after *n* completed passes: emit a final `ev=done` line, then reboot
     * only used in `log` or `efivar` mode; 0 = unlimited (default)
+    * the big green PASS banner is only shown once all *n* passes have completed
+      without error (with 0 it appears after the first clean pass, as upstream)
   * efivar
     * record the test results in the `MT86PlusResult` UEFI variable (vendor GUID
       `b6c2f11a-8a95-4f5e-9c3f-4d1e2a7b9c05`), updated at the start of the run and
